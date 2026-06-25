@@ -1,6 +1,6 @@
 # chipguy_JC8012P4A1C_display
 
-A self-contained **display + touch** driver for the **Guition JC8012P4A1C** —
+A self-contained **display + touch** driver for the 10.1 inch **Guition JC8012P4A1C** —
 an **ESP32-P4** board with an **800×1280 JD9365** MIPI-DSI panel and a
 **GSL3680** capacitive touch panel. It drives the display and the touch
 controller so you don't have to think about either: the hardware is fixed and
@@ -11,14 +11,6 @@ The bundled examples are the heart of the library. Each is a complete, working
 running before your code gets control. You pick the one that matches how you
 want to build your UI, copy it, and start replacing its placeholder UI with your
 own.
-
-> This is for the **JC8012P4A1C** board (ESP32-P4, **800×1280 JD9365**
-> MIPI-DSI, **GSL3680** capacitive touch). Boards with different controllers or
-> resolutions need a different library.
-
-This library is **LVGL-focused**: rotation is done in hardware by the ESP32-P4's
-**PPA (Pixel Processing Accelerator)**, and the same UI code runs unchanged in
-any of the four orientations.
 
 ---
 
@@ -200,28 +192,10 @@ orientation you choose.
 
 LVGL always renders at the **native panel resolution** for the chosen
 orientation into a full-screen draw buffer. On each finished frame the ESP32-P4
-**PPA** rotates that buffer in hardware straight into one of two DSI
+**PPA** hardware rotates that buffer in hardware straight into one of two DSI
 framebuffers, and the panel is flipped to show it. There is **no software
 rotation and no per-pixel CPU work** — rotation costs nothing, and double
 buffering means the next frame renders while the current one is shown.
-
-This is the same hardware path as the companion `chipguy_10inchP4_480display`
-library, but here it renders at the panel's full resolution with **rotation
-only — no scaling**.
-
-### Touch
-
-The GSL3680 is a **capacitive** panel, so — unlike resistive boards — there is
-**no calibration step** and no calibration example. Touch coordinates are read
-in the panel's native frame and mapped to the active rotation automatically by
-the driver (`display.mapTouch()`), so taps line up with what LVGL drew in every
-orientation.
-
-If on your unit the touch axes come out mirrored or swapped for a given
-rotation, adjust the per-rotation mapping in
-`chipguy_JC8012P4A1C_display::mapTouch()` (in
-`src/chipguy_JC8012P4A1C_display.cpp`), or the base `mirror_x` / `mirror_y` /
-`swap_xy` flags in `gsl3680_touch::begin()` (in `src/gsl3680_touch.cpp`).
 
 ---
 
