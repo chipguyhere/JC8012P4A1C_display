@@ -1,0 +1,48 @@
+#######################################
+# Syntax Coloring Map for
+# chipguy_JC8012P4A1C_display
+#######################################
+
+#######################################
+# Datatypes (KEYWORD1)
+#######################################
+
+chipguy_JC8012P4A1C_display	KEYWORD1
+lv_setup_class	KEYWORD1
+
+#######################################
+# Methods and Functions (KEYWORD2)
+#######################################
+
+begin	KEYWORD2
+width	KEYWORD2
+height	KEYWORD2
+nativeWidth	KEYWORD2
+nativeHeight	KEYWORD2
+rotation	KEYWORD2
+setBacklight	KEYWORD2
+flip	KEYWORD2
+waitVsync	KEYWORD2
+getDrawBuffer	KEYWORD2
+getFramebuffer	KEYWORD2
+setActiveFramebuffer	KEYWORD2
+getNumFramebuffers	KEYWORD2
+getTouchDriver	KEYWORD2
+mapTouch	KEYWORD2
+displayDriver	KEYWORD2
+getFrameCount	KEYWORD2
+getUnderrunCount	KEYWORD2
+
+#######################################
+# Instances (KEYWORD2)
+#######################################
+
+display	KEYWORD2
+lv_setup	KEYWORD2
+
+#######################################
+# Constants (LITERAL1)
+#######################################
+
+JC8012_NATIVE_WIDTH	LITERAL1
+JC8012_NATIVE_HEIGHT	LITERAL1
