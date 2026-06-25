@@ -29,7 +29,7 @@
  *
  * Arduino IDE Board Settings:
  *   - Board: ESP32P4 Dev Module
- *   - PSRAM: OPI PSRAM   (REQUIRED — the driver allocates its buffers in PSRAM)
+ *   - PSRAM: Enabled   (REQUIRED — the sketch will not compile without it)
  *   - Flash Size: 16 MegaBytes (128 megabits)
  *   - USB CDC On Boot: Enabled
  *
