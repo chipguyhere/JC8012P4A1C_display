@@ -34,7 +34,7 @@
 #ifdef ARDUINO_ESP32P4_DEV
 
 #ifndef BOARD_HAS_PSRAM
-#error "This library requires PSRAM. Enable PSRAM (OPI) in Arduino IDE Tools menu."
+#error "This library requires PSRAM. Enable PSRAM in the Arduino IDE Tools menu."
 #endif
 
 #include <Arduino.h>

@@ -198,7 +198,18 @@ bool chipguy_JC8012P4A1C_display::initHardware()
 bool chipguy_JC8012P4A1C_display::allocateDrawBuffers()
 {
     size_t buf_size = framebufferSize();
-    size_t cache_line_size = 64;
+
+    // Align the draw buffers to the cache line size.  esp_cache_msync() (used
+    // here and in flip()) requires the start address AND size to be a multiple
+    // of that line size, or it fails with an alignment error and skips the
+    // writeback.  The ESP32-P4 data cache line is 128 bytes; the old hardcoded
+    // 64 left the buffer only 64-aligned, tripping the error on whichever of the
+    // two buffers landed off a 128 boundary.  (This driver is P4-only.)
+    size_t cache_line_size = 128;
+    // framebufferSize() is a multiple of 128 already, but round up defensively
+    // so the whole-buffer msync size stays aligned too.
+    buf_size = (buf_size + cache_line_size - 1) & ~(cache_line_size - 1);
+
     for (int i = 0; i < 2; i++) {
         _draw_buffers[i] = (uint16_t *)heap_caps_aligned_alloc(cache_line_size, buf_size,
                                                                MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
