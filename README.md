@@ -52,8 +52,8 @@ versions.
 This is an **ESP32-P4** board. In **Tools ▸ Board ▸ esp32**, select
 **"ESP32P4 Dev Module"**, and set:
 
-- **PSRAM: OPI PSRAM** — **required.** The driver allocates its draw buffers and
-  framebuffers in PSRAM; without it, `begin()` fails to allocate.
+- **PSRAM: Enabled** — **required.** The driver keeps its draw buffers and
+  framebuffers in PSRAM; the sketch will not compile with PSRAM disabled.
 - **Flash Size: 16 MegaBytes (128 megabits)**
 - **USB CDC On Boot: Enabled** — so the `Serial0` log output is visible.
 
