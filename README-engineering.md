@@ -288,8 +288,8 @@ Developed on a whole-panel raster band, 2026-11-13/14:
   done, so every chunk up to that one is reported and none beyond (`rasterMerged()`
   counts the catch-ups). The first version assumed the band ends at the panel's
   bottom. Here the list's last item may be the framebuffer below the band, so with `LLP`
-  = 0 the band's last chunk is done too. **TODO (bench):** that case (RasterBouncingBalls,
-  band 0..1119) has not been run since the change.
+  = 0 the band's last chunk is done too. Checked 2026-11-15 with RasterBouncingBalls (band
+  0..1119, 2 buffers): 52 fps, 0 late or dropped, 200 see-through balls in 206 µs a chunk.
 - **Direct chunks** (`raster_direct`): a chunk's item patched in every list to read the
   framebuffer instead of its buffer. The bit is kept even before the band is applied (early calls were lost otherwise).
 - **Framebuffers on the 128-byte cache line** (`heap_caps_aligned_calloc`), so the PPA
@@ -419,25 +419,70 @@ four blocks a frame.
 
 The controller sits on the panel's flex (FPC2): reset GPIO22, interrupt GPIO21, I²C at
 0x40 on the board's **shared** bus (GPIO7/8). It has no flash of its own: every
-`begin()` resets it and downloads its firmware (~4,600 register writes from
-`gsl3680_fw.h`), then verifies it. Coordinates come through the vendor's `gsl_point_id`
-tracker.
+`begin()` resets it, uploads its firmware and checks that it started (register 0xB0
+reads `5A5A5A5A`). The driver, `gsl3680_touch.cpp`, is this library's own (MIT); the
+register sequence is the one the vendor bring-up uses.
 
-**The bus.** The vendored driver used to install ESP-IDF's legacy I²C driver on
-`I2C_NUM_0` itself, which made the codec, RTC and I²C header on the same pins
-unreachable and risked IDF's legacy-vs-new driver conflict with the core's `Wire`. Its
-two register functions now call a `gsl3680_bus_t` hook, which `gsl3680_touch` points at
-`board.Wire.readRegister()` / `writeRegister()` from the board library — see the board
-library's [engineering notes](https://github.com/chipguyhere/JC8012P4A1C_board/blob/main/README-engineering.md#the-shared-i2c-bus).
+**The firmware lives in NVS, not here.** It is Silead's, from their GPL-2.0 gslX680
+driver, so the library doesn't carry it: the
+[firmware installer](https://github.com/chipguyhere/ESP32-P4-C6-firmware-installer/blob/main/README.md)'s
+`InstallFirmware` writes it once to NVS namespace `jc8012`, key `gsl3680fw`. The
+image is the controller's RAM page by page — page number, then 32 words, little-endian;
+139 pages, 18,348 bytes — stored zlib-compressed (9,878 bytes), because the P4's default
+NVS partition (20 KB, one page reserved) has no room for it raw. `begin()` inflates it
+with the miniz in the P4's ROM, checks its SHA-256 against the constant in
+`gsl3680_touch.cpp` (`650876e3…94006`) and only then uploads it (~4,450 four-byte
+register writes). `status()` reports `NO_FIRMWARE` / `BAD_FIRMWARE` when NVS lacks it,
+and the display's `begin()` then comes up without touch instead of spending its
+reboot-and-retry budget, which only `NO_RESPONSE` / `NOT_RUNNING` can benefit from.
+
+**No host algorithm.** Silead's driver feeds each report through a host-side tracker
+(`gsl_point_id.c`, also GPL) that assigns finger IDs, filters, edge-corrects and
+occasionally retunes the scan frequency. Measured against it on the bench (2026-11-15,
+`JC8012_GSL3680_Probe`, 26 held targets over two runs plus 2.5k drag frames):
+
+- Raw reports map linearly onto the panel: native x = Y·800/896, native y =
+  1280 − X·1280/1664 (fits: 0.879–0.890 and −0.771…−0.778, r > 0.9997). 896 and 1664 are
+  the 14 × 26 electrode grid in the controller's config at 64 units per electrode
+  (inferred; it matches the fits). Error at the targets: raw 9.7 / 8.5 px RMS, the
+  algorithm 10.7 / 9.2 — finger placement, not the controller. Contacts reach all edges.
+- The algorithm smooths and lags: it trails raw by 2–3 reads (~40 ms); frame-to-frame
+  acceleration median 2 px against raw's 6.
+- Report layout at 0x80: byte 0 = contacts (up to 5 records fit; 4 seen), bytes 1–3 =
+  a frame counter that advances once per scan (19 % of 16 ms polls repeated the previous
+  scan), then 4 bytes per contact: Y (16 bits; a value with top bits set, `0x4xxx`, is a
+  flag seen at touch-down and lift, not a position — the algorithm drops those) and X
+  (12 bits, top 4 bits an ID that this firmware always leaves 0).
+- Slot order is not stable: two fingers swapped slots 24 times in 1,546 frames.
+- The frequency retune fired once per run. Its absence is the one effect not measured:
+  **TODO (bench):** touch in an electrically noisy setting (cheap charger, motor).
+
+**The bus.** `gsl3680_touch` talks through `board.Wire.readRegister()` /
+`writeRegister()` from the board library — see its
+[engineering notes](https://github.com/chipguyhere/JC8012P4A1C_board/blob/main/README-engineering.md#the-shared-i2c-bus).
 The display object therefore takes a `JC8012P4A1C_Board&`, and `begin()` starts the
 board (idempotently) before touch. Verified on hardware (2026-09-30): touch tracks the
 finger through the shared bus, and the codec and RTC answer on it alongside.
 
 **Filtering** (in `gsl3680_touch.cpp`, with the measurements that set each threshold in
-the comments there): the panel emits phantom contacts that park near an axis end for
-~150 ms. `getTouch()` holds the last good point through up to 4 failed/empty reads
-(release debounce), rejects jumps over 350 raw units for up to 6 reads, and runs a
-7-sample sliding median — at a ~16 ms poll that trails the finger by about 50 ms.
+the comments there), in native pixels. The holds are timed, not counted in reads:
+counted, a caller polling slowly (LVGL behind a heavy frame — measured with
+`LvglBouncingBalls` at a high ball count) stretched a tap into a press long enough to
+swallow the next tap as a drag. Always on, because none adds lag:
+
+1. A read that repeats the last frame counter returns the last result (if the counter
+   hasn't moved for 150 ms it counts as a dropout, so a stalled controller can't hold a
+   press forever; it normally advances every ~20 ms).
+2. Flagged records are skipped. Failed or empty reads are ridden out for 65 ms (release
+   debounce).
+3. One finger is followed: the contact nearest the previous sample, not slot 0.
+
+Off by default, on with `display.setTouchFilter(true)` (the same switch as
+`chipguy_P486_or_JC8012_display`), for panels where a twitch does harm — a volume slider:
+
+4. A step over 350 px is held for up to 100 ms, then the touch is dropped — the panel
+   emits phantom contacts that park near an axis end for ~150 ms.
+5. A 7-sample sliding median (~50 ms of lag at a 16 ms poll).
 
 ## Backlight
 

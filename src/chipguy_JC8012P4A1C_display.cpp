@@ -343,12 +343,14 @@ bool chipguy_JC8012P4A1C_display::initHardware()
     if (_touch.begin()) {
         _touch_ok = true;
         ESP_LOGI(TAG, "Touch controller initialized");
-    } else if (s_panel_init_attempts < PANEL_INIT_MAX_ATTEMPTS) {
+    } else if (_touch.retryMightHelp() && s_panel_init_attempts < PANEL_INIT_MAX_ATTEMPTS) {
+        // Only a controller that didn't answer is worth a reboot.  Firmware
+        // missing from NVS won't appear on its own: come up without touch.
         return panelInitFailed("gsl3680 touch init", ESP_OK);
     } else {
         _touch_ok = false;
-        ESP_LOGE(TAG, "Touch init failed and the retry budget is spent; "
-                      "continuing with touch disabled.");
+        ESP_LOGE(TAG, "Touch unavailable (%s); continuing with touch disabled.",
+                 gsl3680_touch::statusText(_touch.status()));
     }
 
     return true;

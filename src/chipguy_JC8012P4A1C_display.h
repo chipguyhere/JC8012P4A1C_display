@@ -159,6 +159,19 @@ public:
     // Touch driver access (the GSL3680 reports in NATIVE panel coordinates).
     gsl3680_touch& getTouchDriver() { return _touch; }
 
+    // Start the touch controller again, e.g. after its firmware was installed
+    // in NVS while this sketch was running.  Updates touchAvailable().
+    bool restartTouch() { _touch_ok = _touch.begin(); return _touch_ok; }
+
+
+    // The touch driver's phantom-jump rejection and 7-sample median: off by
+    // default.  Turn on for a panel where a spurious contact must never yank a
+    // control (a volume slider), at the cost of ~50 ms lag and very fast
+    // swipes being cut short.  See gsl3680_touch.h.  Before or after begin().
+    void setTouchFilter(bool on) { _touch.setFilter(on); }
+    bool touchFilter() const { return _touch.filter(); }
+
+
     // False if the touch controller failed to initialize and begin() came up
     // with touch disabled (display still works; getTouch() reports no touches).
     bool touchAvailable() const { return _touch_ok; }

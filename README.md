@@ -17,7 +17,7 @@ running before your code gets control. You pick the one that matches how you
 want to build your UI, copy it, and start replacing its placeholder UI with your
 own.
 
-This library is one of four for the board:
+This library is one of five for the board:
 
 | Library | What it does |
 |---|---|
@@ -25,6 +25,7 @@ This library is one of four for the board:
 | [chipguy_JC8012P4A1C_480display](https://github.com/chipguyhere/JC8012P4A1C_480display) | The same screen drawn 480 pixels wide and scaled up — for UIs written for 480×480 boards |
 | [chipguy_JC8012P4A1C_board](https://github.com/chipguyhere/JC8012P4A1C_board) | The shared I²C bus, the pin map, and what else is on the board — speaker, microphone, clock, LED, SD slot, camera, expansion connectors |
 | [chipguy_JC8012P4A1C_power](https://github.com/chipguyhere/JC8012P4A1C_power) | The battery and sleep |
+| [chipguy_ESP32-P4-C6-firmware-installer](https://github.com/chipguyhere/ESP32-P4-C6-firmware-installer/blob/main/README.md) | Run once per board: installs the touch firmware and updates the Wi-Fi chip |
 
 You need the **board** library installed too — touch talks through it.
 
@@ -42,6 +43,11 @@ there is no Arduino Library Manager entry. To install:
    - Windows: `Documents\Arduino\libraries\`
 3. Do the same for **chipguy_JC8012P4A1C_board**.
 4. Restart Arduino IDE so the examples will appear in the File menu.
+5. **Once per board:** run the **[firmware installer](https://chipguyhere.github.io/esp-launchpad/minimal-launchpad/?flashConfigURL=https://raw.githubusercontent.com/chipguyhere/ESP32-P4-C6-firmware-installer/main/launchpad.toml)**: one click in Chrome or
+   Edge, no IDE needed. Touch needs firmware that this library doesn't include; the
+   installer stores it on the board, where it stays through later uploads, and brings
+   the Wi-Fi chip's firmware up to date too. Until then the screen works but touch
+   doesn't, and the serial log says why. [How and why](https://github.com/chipguyhere/ESP32-P4-C6-firmware-installer/blob/main/README.md).
 
 (Alternatively, in the IDE: **Sketch ▸ Include Library ▸ Add .ZIP Library…**
 and select the downloaded ZIP.)
@@ -314,6 +320,7 @@ battery is in the **[power library](https://github.com/chipguyhere/JC8012P4A1C_p
 | [README-raster.md](README-raster.md) | Developers drawing part of the screen themselves, in step with the panel: the API, the time each chunk has, and the rules. |
 | [README-engineering.md](README-engineering.md) | Engineers: the MIPI-DSI bring-up, the panel-reset and retry strategy, the PPA rotation pipeline and its memory budget, the DMA scan list and the 2560-block test, how the terminal and the raster band work inside, the touch driver and its filtering, the backlight circuit. |
 | [board library README](https://github.com/chipguyhere/JC8012P4A1C_board/blob/main/README.md) | What else is on the board, and the I²C bus touch shares. |
+| [firmware installer README](https://github.com/chipguyhere/ESP32-P4-C6-firmware-installer/blob/main/README.md) | Installing the touch firmware and the Wi-Fi chip's firmware, and why they are kept separate. |
 | [board README-board.md](https://github.com/chipguyhere/JC8012P4A1C_board/blob/main/README-board.md) | Developers: pin map, free pins, headers, USB ports. |
 | [board README-sound.md](https://github.com/chipguyhere/JC8012P4A1C_board/blob/main/README-sound.md) | Sound out and in. |
 | [board README-sdcard.md](https://github.com/chipguyhere/JC8012P4A1C_board/blob/main/README-sdcard.md) | Mounting the card. |
@@ -326,22 +333,17 @@ battery is in the **[power library](https://github.com/chipguyhere/JC8012P4A1C_p
 
 This library is **mixed-license**:
 
-- The original code (display driver, `lv_setup`, examples) is **MIT** — see
+- The original code (display driver, touch driver, `lv_setup`, examples) is **MIT** — see
   [LICENSE](LICENSE).
-- The vendored ESP-IDF derivatives — `esp_lcd_jd9365.c/.h`, `esp_lcd_panel_dpi_bb.c/.h`
-  and `esp_lcd_touch.c/.h` (Copyright © Espressif Systems) — are licensed under the
+- The vendored ESP-IDF derivatives — `esp_lcd_jd9365.c/.h` and `esp_lcd_panel_dpi_bb.c/.h`
+  (Copyright © Espressif Systems) — are licensed under the
   **Apache License, Version 2.0**; see [LICENSE-Apache-2.0.txt](LICENSE-Apache-2.0.txt).
   Those files carry SPDX headers recording the upstream attribution and the modifications.
-- The **GSL3680 touch** code — `gsl3680_fw.c/.h`, `gsl_point_id.c/.h` — comes from
-  Silead's gslX680 Linux touchscreen driver and is licensed under the **GNU General Public
-  License, version 2** (`gsl_point_id.c`: version 2 or any later version); see
-  [LICENSE-GPL-2.0.txt](LICENSE-GPL-2.0.txt).
 
-**What the GPL part means for you:** the touch driver is compiled into every sketch that
-uses this library. If you only build and use your sketch yourself, nothing changes. If you
-**give or sell firmware or devices** built with it, the GPL applies to that firmware: you
-must offer its complete source code under the GPL. Your own MIT code and the Apache-2.0
-files stay under their licenses inside that whole.
+Nothing here is GPL. The touch controller's firmware, which is Silead's and GPL-licensed,
+is not part of this library: the [firmware installer](https://github.com/chipguyhere/ESP32-P4-C6-firmware-installer/blob/main/README.md) puts it in the board's
+flash once, and the touch driver reads it from there at power-up. Sketches built with this
+library don't contain it.
 
 The JD9365 initialization values are standard panel register settings. `lv_conf.h` is
 based on LVGL's template (LVGL is MIT-licensed). The terminal's fonts are rendered from
