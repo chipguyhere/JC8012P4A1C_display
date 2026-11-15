@@ -1,3 +1,7 @@
+/*
+ * Interface to gsl_point_id.c, Silead's touch-point tracking (GNU GPL version 2
+ * or later; see that file, LICENSE-GPL-2.0.txt and the README's License section).
+ */
 #ifndef _GSL_POINT_ID_H
 #define _GSL_POINT_ID_H
 

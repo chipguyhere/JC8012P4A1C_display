@@ -21,6 +21,12 @@ nativeWidth	KEYWORD2
 nativeHeight	KEYWORD2
 rotation	KEYWORD2
 setBacklight	KEYWORD2
+sleep	KEYWORD2
+wake	KEYWORD2
+isAsleep	KEYWORD2
+sleepUntilSwipe	KEYWORD2
+sleepUntilTap	KEYWORD2
+sleepUntilButton	KEYWORD2
 flip	KEYWORD2
 waitVsync	KEYWORD2
 getDrawBuffer	KEYWORD2
@@ -28,10 +34,25 @@ getFramebuffer	KEYWORD2
 setActiveFramebuffer	KEYWORD2
 getNumFramebuffers	KEYWORD2
 getTouchDriver	KEYWORD2
+onTouch	KEYWORD2
+touchAvailable	KEYWORD2
 mapTouch	KEYWORD2
 displayDriver	KEYWORD2
 getFrameCount	KEYWORD2
 getUnderrunCount	KEYWORD2
+setRasterRows	KEYWORD2
+setRasterBuffers	KEYWORD2
+rasterBuffer	KEYWORD2
+setRasterDirect	KEYWORD2
+rasterChunksRead	KEYWORD2
+setRasterPrefetch	KEYWORD2
+setRasterPrefetchPause	KEYWORD2
+setInterruptCore	KEYWORD2
+rasterMerged	KEYWORD2
+takeRasterCopyMaxUs	KEYWORD2
+rasterCopyWaitUs	KEYWORD2
+rasterCopyPausedUs	KEYWORD2
+rasterCopiesByCpu	KEYWORD2
 
 #######################################
 # Instances (KEYWORD2)
@@ -39,6 +60,7 @@ getUnderrunCount	KEYWORD2
 
 display	KEYWORD2
 lv_setup	KEYWORD2
+board	KEYWORD2
 
 #######################################
 # Constants (LITERAL1)

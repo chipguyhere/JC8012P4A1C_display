@@ -9,6 +9,14 @@
 #ifndef LV_CONF_H
 #define LV_CONF_H
 
+/* Build LVGL at -O2: the Arduino core compiles at -Os, and LVGL's software
+ * renderer is what limits the frame rate on a panel this size.  Every LVGL
+ * source file includes this header first, so the pragma reaches all of LVGL
+ * without changing the build settings.  Costs about 80 KB of flash. */
+#if !defined(__ASSEMBLY__)
+#pragma GCC optimize ("O2")
+#endif
+
 /*If you need to include anything here, do it inside the `__ASSEMBLY__` guard */
 #if  0 && defined(__ASSEMBLY__)
 #include "my_include.h"

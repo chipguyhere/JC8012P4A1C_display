@@ -23,12 +23,14 @@
  *
  * Requires the following libraries:
  *   - chipguy_JC8012P4A1C_display  (display + touch driver, this library)
+ *   - chipguy_JC8012P4A1C_board    (shared I2C bus + pin map)
  *   - lvgl 9
  *
  * Arduino IDE Board Settings:
  *   - Board: ESP32P4 Dev Module
  *   - PSRAM: Enabled   (REQUIRED — the sketch will not compile without it)
  *   - Flash Size: 16 MegaBytes (128 megabits)
+ *   - Partition Scheme: Custom (uses the partitions.csv in this sketch folder)
  *   - USB CDC On Boot: Enabled
  *
  ******************************************************************************/

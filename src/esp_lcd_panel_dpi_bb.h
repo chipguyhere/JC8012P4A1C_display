@@ -1,14 +1,9 @@
 /*
- * SPDX-FileCopyrightText: 2024 chipguyhere
+ * SPDX-FileCopyrightText: 2024-2026 chipguyhere
  * SPDX-License-Identifier: Apache-2.0
  *
- * ESP32-P4 MIPI DSI DPI Panel Driver with Hardware Scrolling
- * Forked from ESP-IDF esp_lcd_panel_dpi.c
- *
- * Supports:
- * - Hardware vertical scrolling (any row offset, wrap-around)
- * - Hardware horizontal scrolling (8-pixel granularity due to 16-byte DMA alignment)
- * - Virtual framebuffer for pre-drawing content ahead of scroll position
+ * ESP32-P4 MIPI DSI DPI Panel Driver with page flipping and hardware scrolling.
+ * Forked from ESP-IDF esp_lcd_panel_dpi.c; see the .c file for what changed.
  */
 
 #pragma once
@@ -43,7 +38,9 @@ typedef struct {
     lcd_color_format_t out_color_format;
     uint8_t num_fbs;  // Number of framebuffers
     esp_lcd_video_timing_t video_timing;
-    uint32_t virtual_v_pixels;     // Virtual framebuffer height for scrolling (0 = same as display height)
+    uint32_t virtual_v_pixels;     // Framebuffer height in rows, >= the panel's (0 = same as the panel)
+    uint16_t num_dma_blocks;       // most DMA blocks a frame may use, 4..4096 (0 = 8): 64 bytes of
+                                   // internal RAM each, per framebuffer; a raster band needs one per chunk
     struct {
         uint32_t use_dma2d: 1;
         uint32_t disable_lp: 1;
@@ -95,46 +92,118 @@ esp_err_t chipguy_lcd_dpi_panel_get_frame_buffer(
 );
 
 /**
- * @brief Set scroll position (both X and Y)
+ * @brief How each frame is read out of the framebuffer (rows, top to bottom)
  *
- * X scrolling requires 8-pixel alignment due to 16-byte DMA alignment requirement.
- * The X value will be rounded down to the nearest 8-pixel boundary.
- * Y scrolling supports any row offset with automatic wrap-around.
- *
- * @param panel Panel handle
- * @param x_pixels X scroll offset in pixels (will be aligned to 8-pixel boundary)
- * @param y_rows Y scroll offset in rows (wraps within virtual_v_pixels)
+ * The panel shows, in order:
+ *   1. rows [0, top) of the framebuffer -- a frozen top band;
+ *   2. `window` rows taken from a ring of `ring` rows that starts at framebuffer
+ *      row `top`, beginning `offset` rows into the ring and wrapping round its
+ *      end -- the scrolling area;
+ *   3. the remaining (v_pixels - top - window) rows from framebuffer row
+ *      top + ring onward -- a frozen bottom band.
+ * The plain layout is { 0, v_pixels, v_pixels, 0 }.  A ring longer than the
+ * window holds rows that are not on screen, to draw into before they scroll in;
+ * the framebuffer must then be taller than the panel (virtual_v_pixels).
  */
-void chipguy_lcd_dpi_panel_set_scroll(
+typedef struct {
+    uint32_t top;
+    uint32_t ring;
+    uint32_t window;
+    uint32_t offset;
+} chipguy_lcd_dpi_layout_t;
+
+/**
+ * @brief Change the layout, effective from the next frame boundary (no tearing)
+ *
+ * Scrolling is a change of `offset` alone.  Applies to whichever framebuffer is
+ * active.  Returns ESP_ERR_INVALID_ARG if the layout does not fit.
+ */
+esp_err_t chipguy_lcd_dpi_panel_set_layout(
     esp_lcd_panel_handle_t panel,
-    int x_pixels,
-    int y_rows
+    const chipguy_lcd_dpi_layout_t *layout
 );
 
 /**
- * @brief Set Y scroll offset only (vertical scrolling)
- *
- * The y_offset wraps within virtual_v_pixels automatically.
- * This is the most common scrolling operation for text displays.
- *
- * @param panel Panel handle
- * @param y_rows Y offset in rows (0 to virtual_v_pixels-1)
+ * @brief True until the frame boundary that applies the last set_layout()
  */
-void chipguy_lcd_dpi_panel_set_scroll_y(
+bool chipguy_lcd_dpi_panel_is_layout_pending(esp_lcd_panel_handle_t panel);
+
+/**
+ * @brief Raster band: rows scanned from bounce buffers instead of the framebuffer
+ *
+ * Display rows [y0, y0 + chunks * chunk_rows) are read, chunk_rows at a time,
+ * from bufs[0], bufs[1], ... bufs[nbufs - 1], bufs[0], ... (chunk c from
+ * bufs[c % nbufs]); the other rows come from the active framebuffer as usual.
+ * Each chunk is its own DMA block, so chunks plus the framebuffer pieces above
+ * and below must fit in the panel's num_dma_blocks (the DMA lists' capacity;
+ * there is no hardware limit).  `chunks` must be a multiple of nbufs, so
+ * chunk 0 of every frame uses bufs[0].
+ *
+ * `done` is called from the DMA interrupt when chunk c has been read out of its
+ * buffer (the panel scans it within a few rows): from then on bufs[c % nbufs]
+ * may be refilled, normally with chunk c + nbufs (wrapping into the next
+ * frame).  Which chunks are done is read from where the DMA is, so if this
+ * core's interrupts were held off long enough for two chunks' interrupts to
+ * merge, both are reported (chipguy_lcd_dpi_panel_raster_merged counts them).
+ * It returns true if it woke a higher-priority task.
+ *
+ * Needs the plain layout.  Takes effect at the next frame boundary; fill
+ * the first chunks before calling.  chunks = 0 turns the band off.
+ */
+typedef bool (*chipguy_lcd_dpi_raster_done_cb_t)(uint32_t chunk, void *ctx);
+
+typedef struct {
+    uint32_t y0;
+    uint32_t chunk_rows;
+    uint32_t chunks;
+    void *bufs[8];               // each chunk_rows full rows; DMA-capable, 8-byte aligned
+    uint32_t nbufs;              // 2 (0 means 2) to 8 bounce buffers, chunk c from bufs[c % nbufs];
+                                 // chunks must be a multiple of it
+    chipguy_lcd_dpi_raster_done_cb_t done;
+    void *ctx;
+} chipguy_lcd_dpi_raster_t;
+
+/**
+ * @brief EXPERIMENTAL: a frame read as an arbitrary list of blocks
+ *
+ * Each block is `bytes` bytes read from `src`, in order, and the blocks
+ * together are exactly one frame (h_size x v_size pixels); a block may end
+ * mid-row, and the next block's source can be anywhere.  Every src and bytes
+ * must be a multiple of 8, and n at most num_dma_blocks.  The array is used
+ * in place and must stay valid while the list is set; call this again after
+ * changing it.  Applied at the next frame boundary, and the DMA list is
+ * rebuilt then, so a long list costs time in that interrupt (measured on
+ * the JC8012).  Overrides the framebuffer, layout and raster band until
+ * called with n = 0.  Not with a raster band.
+ */
+typedef struct {
+    const void *src;
+    uint32_t bytes;
+} chipguy_lcd_dpi_block_t;
+
+esp_err_t chipguy_lcd_dpi_panel_set_blocks(esp_lcd_panel_handle_t panel,
+                                           const chipguy_lcd_dpi_block_t *blocks, uint32_t n);
+
+esp_err_t chipguy_lcd_dpi_panel_set_raster(
     esp_lcd_panel_handle_t panel,
-    int y_rows
+    const chipguy_lcd_dpi_raster_t *raster
 );
 
 /**
- * @brief Check if a scroll change is still pending
+ * @brief Read one raster chunk straight from the framebuffer
  *
- * Scroll changes are applied at frame boundaries to avoid tearing.
- * This function checks if there's a pending scroll waiting to be applied.
- *
- * @param panel Panel handle
- * @return true if there's a pending scroll waiting to be applied at next frame
+ * direct = true: chunk `chunk` is read from the active framebuffer's rows, not its bounce buffer, so
+ * its callback need not fill anything; false: from the bounce buffer again. Takes effect when the
+ * DMA next reaches that chunk; the done callback is called for it either way. From the raster
+ * callback for that chunk, it applies to the chunk about to be read.
  */
-bool chipguy_lcd_dpi_panel_is_scroll_pending(esp_lcd_panel_handle_t panel);
+void chipguy_lcd_dpi_panel_raster_direct(esp_lcd_panel_handle_t panel, uint32_t chunk, bool direct);
+
+/**
+ * @brief Chunk interrupts that came merged with another (the chunks then reported from where
+ * the DMA is: two at once, as they are done), since the panel was made
+ */
+uint32_t chipguy_lcd_dpi_panel_raster_merged(esp_lcd_panel_handle_t panel);
 
 /**
  * @brief Get the virtual framebuffer height
@@ -159,6 +228,17 @@ uint32_t chipguy_lcd_dpi_panel_get_display_height(esp_lcd_panel_handle_t panel);
  * @return Display width in pixels
  */
 uint32_t chipguy_lcd_dpi_panel_get_display_width(esp_lcd_panel_handle_t panel);
+
+/**
+ * @brief Pause / resume the video stream (chipguy custom)
+ *
+ * pause() lets the DMA finish the current frame, then stops it and takes the
+ * DSI host and bridge out of video mode -- required before light sleep, which
+ * otherwise gates the clocks mid-transfer and hangs the bus.  Put the panel in
+ * Sleep In first.  resume() restarts the stream from the active framebuffer.
+ */
+esp_err_t chipguy_lcd_dpi_panel_pause(esp_lcd_panel_handle_t panel, uint32_t timeout_ms);
+esp_err_t chipguy_lcd_dpi_panel_resume(esp_lcd_panel_handle_t panel);
 
 /**
  * @brief Get total frame count since initialization
@@ -193,7 +273,8 @@ bool chipguy_lcd_dpi_panel_wait_vsync(uint32_t timeout_ms);
 /**
  * @brief Set active framebuffer for display
  *
- * Switches which framebuffer is being displayed. This resets scroll to (0,0).
+ * Switches which framebuffer is being displayed, from the next frame boundary.
+ * The layout is unchanged.
  * Use this for double-buffering with LVGL or similar graphics libraries.
  *
  * @param panel Panel handle

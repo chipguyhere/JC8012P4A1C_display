@@ -1,3 +1,14 @@
+/*
+ * GSL3680 touch controller driver and firmware.
+ *
+ * Derived from Silead's gslX680 Linux touchscreen driver (the firmware table
+ * GSLX680_FW and the register sequence), which Silead distributes under the
+ * GNU General Public License, version 2 (gsl_point_id.c, from the same driver:
+ * version 2 or any later version).  Adapted for ESP-IDF / esp_lcd_touch and
+ * this board by chipguyhere.  Distributed under the same GPL terms; see
+ * LICENSE-GPL-2.0.txt and the README's License section.  A program built with
+ * this file is a work based on it under the GPL.
+ */
 #include <stdio.h>
 #include <string.h>
 #include "freertos/FreeRTOS.h"
@@ -160,15 +171,22 @@ static esp_err_t esp_lcd_touch_gsl3680_clear_reg(esp_lcd_touch_handle_t tp);
 static esp_err_t esp_lcd_touch_gsl3680_init(esp_lcd_touch_handle_t tp);
 static TP_STATE_E _Get_Cal_msg(void);
 
-esp_err_t gsl3680_touch_init_local(esp_lcd_panel_io_handle_t io, const esp_lcd_touch_config_t *config, esp_lcd_touch_handle_t *out_touch)
+/* The shared-bus transport, copied in by gsl3680_touch_init_local().  There is
+ * only ever one GSL3680 (the controller handle below is a singleton too), so a
+ * file-scope copy is enough; tp->io is left NULL. */
+static gsl3680_bus_t s_bus;
+
+esp_err_t gsl3680_touch_init_local(const gsl3680_bus_t *bus, const esp_lcd_touch_config_t *config, esp_lcd_touch_handle_t *out_touch)
 {
      esp_err_t ret = ESP_OK;
 
-    ESP_LOGI(TAG, "gsl3680_touch_init_local called, io=%p", io);
+    ESP_LOGI(TAG, "gsl3680_touch_init_local called");
 
-    assert(io != NULL);
+    assert(bus != NULL && bus->read != NULL && bus->write != NULL);
     assert(config != NULL);
     assert(out_touch != NULL);
+
+    s_bus = *bus;
 
     ESP_LOGI(TAG, "config: x_max=%d, y_max=%d, rst=%d, int=%d",
              config->x_max, config->y_max, config->rst_gpio_num, config->int_gpio_num);
@@ -177,8 +195,8 @@ esp_err_t gsl3680_touch_init_local(esp_lcd_panel_io_handle_t io, const esp_lcd_t
     esp_lcd_touch_gsl3680 = heap_caps_calloc(1, sizeof(esp_lcd_touch_t), MALLOC_CAP_DEFAULT);
     ESP_GOTO_ON_FALSE(esp_lcd_touch_gsl3680, ESP_ERR_NO_MEM, err, TAG, "no mem for GSL3680 controller");
 
-    /* Communication interface */
-    esp_lcd_touch_gsl3680->io = io;
+    /* Communication interface: the shared bus in s_bus, not an esp_lcd IO */
+    esp_lcd_touch_gsl3680->io = NULL;
 
     /* Only supported callbacks are set */
     esp_lcd_touch_gsl3680->read_data = esp_lcd_touch_gsl3680_read_data;
@@ -324,7 +342,10 @@ static uint32_t read_data_call_count = 0;
 static esp_err_t esp_lcd_touch_gsl3680_read_data(esp_lcd_touch_handle_t tp)
 {
     esp_err_t err;
-    uint8_t touch_data[24];
+    /* Zeroed, not left as stack garbage: what lands here is fed to the vendor
+     * tracker below, and an uninitialised frame is indistinguishable from a
+     * real report to it. */
+    uint8_t touch_data[24] = {0};
     uint8_t touch_cnt = 0;
     uint16_t x_poit, y_poit, x2_poit, y2_poit;
 	uint16_t  distance = 0, chazhi = 0;
@@ -341,6 +362,22 @@ static esp_err_t esp_lcd_touch_gsl3680_read_data(esp_lcd_touch_handle_t tp)
     memset(XY_Coordinate,0,sizeof(XY_Coordinate));
 
     err = touch_gsl3680_i2c_read(tp, ESP_LCD_TOUCH_GSL3680_READ_XY_REG, touch_data, 24);
+
+    /* The vendor code captured this error, logged it, and carried on into
+     * gsl_alg_id_main() with whatever was in touch_data.  That is the worst
+     * possible response to a failed read, because gsl_alg_id_main() is a
+     * STATEFUL tracker: garbage fed in once does not merely produce one bad
+     * sample, it corrupts the contact tracking so that later, perfectly good
+     * reads come back wrong too - phantom contacts, and contacts that appear
+     * to lift.  Electrically noisy installations are exactly where I2C reads
+     * fail, and exactly where those symptoms were reported.
+     *
+     * Bail out instead and let the caller decide.  gsl3680_touch::getTouch()
+     * treats the error as a dropout to be ridden out, not as a finger
+     * lifting. */
+    if (err != ESP_OK) {
+        return err;
+    }
 
     // Debug output every 100 calls
     read_data_call_count++;
@@ -468,20 +505,36 @@ static bool esp_lcd_touch_gsl3680_get_xy(esp_lcd_touch_handle_t tp, uint16_t *x,
 
     portENTER_CRITICAL(&tp->data.lock);
 
-    *point_num = Finger_num;
-    x[0] = XY_Coordinate[0].x_position;
-    y[0] = XY_Coordinate[0].y_position;
+    /* Vendor code shipped this loop as
+     *
+     *     x[0] = XY_Coordinate[0].x_position;          // point 0
+     *     for (int i = 1; i < Finger_num; i++)
+     *         x[i-1] = XY_Coordinate[i].x_position;    // clobbers point 0
+     *
+     * The off-by-one made every additional contact overwrite the point below
+     * it, so the instant the controller saw a second finger, point 0 - the
+     * one every single-touch caller reads - became point 1.  On the 10 inch
+     * panel that shows up as a phantom contact stealing the touch: the ghost
+     * parks near one end of the axis for ~150ms and the finger under the
+     * user's hand disappears, which is what made LVGL sliders jump to 0% or
+     * 100% mid-drag.  Callers were never at fault; point 0 was simply gone.
+     *
+     * The count is also clamped now.  Finger_num is a raw count from the
+     * controller, while x[]/y[] are only max_point_num long, so the old loop
+     * would run off the end of the caller's arrays for three or more
+     * contacts - and esp_lcd_touch_get_coordinates() would then apply its
+     * mirror/swap pass over the same out-of-range span.
+     */
+    uint8_t n = (Finger_num > max_point_num) ? max_point_num : (uint8_t)Finger_num;
 
-    if(Finger_num > 1)
+    for (uint8_t i = 0; i < n; i++)
     {
-        for(int i=1;i<Finger_num;i++)
-        {
-            x[i-1] = XY_Coordinate[i].x_position;
-            y[i-1] = XY_Coordinate[i].y_position;
-            // strength[i] = XY_Coordinate[i].finger_id;
-        }
+        x[i] = XY_Coordinate[i].x_position;
+        y[i] = XY_Coordinate[i].y_position;
+        // strength[i] = XY_Coordinate[i].finger_id;
     }
-    
+
+    *point_num = n;
 
     portEXIT_CRITICAL(&tp->data.lock);
 
@@ -534,6 +587,14 @@ static esp_err_t esp_lcd_touch_gsl3680_del(esp_lcd_touch_handle_t tp)
 }
 
 /*===================================================================================================================================================================================================*/
+esp_err_t gsl3680_touch_restart_local(esp_lcd_touch_handle_t tp, bool verify)
+{
+    if (tp == NULL) return ESP_ERR_INVALID_STATE;
+    touch_gsl3680_reset(tp);
+    esp_lcd_touch_gsl3680_startup_chip(tp);
+    return verify ? esp_lcd_touch_gsl3680_read_ram_fw(tp) : ESP_OK;
+}
+
 static esp_err_t esp_lcd_touch_gsl3680_init(esp_lcd_touch_handle_t tp)
 {
     ESP_LOGI(TAG,"start init");
@@ -649,8 +710,8 @@ static esp_err_t touch_gsl3680_i2c_read(esp_lcd_touch_handle_t tp, uint16_t reg,
     assert(tp != NULL);
     assert(data != NULL);
 
-    /* Read data */
-    esp_err_t ret = esp_lcd_panel_io_rx_param(tp->io, reg, data, len);
+    /* Read data over the shared bus (see gsl3680_bus_t) */
+    esp_err_t ret = s_bus.read(s_bus.ctx, (uint8_t)reg, data, len);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "I2C read reg 0x%02x failed: %d", reg, ret);
     }
@@ -661,7 +722,7 @@ static esp_err_t touch_gsl3680_i2c_write(esp_lcd_touch_handle_t tp, uint16_t reg
 {
     assert(tp != NULL);
 
-    esp_err_t ret = esp_lcd_panel_io_tx_param(tp->io, reg, data, len);
+    esp_err_t ret = s_bus.write(s_bus.ctx, (uint8_t)reg, data, len);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "I2C write reg 0x%02x failed: %d", reg, ret);
     }

@@ -1,3 +1,14 @@
+/*
+ * GSL3680 touch controller driver and firmware.
+ *
+ * Derived from Silead's gslX680 Linux touchscreen driver (the firmware table
+ * GSLX680_FW and the register sequence), which Silead distributes under the
+ * GNU General Public License, version 2 (gsl_point_id.c, from the same driver:
+ * version 2 or any later version).  Adapted for ESP-IDF / esp_lcd_touch and
+ * this board by chipguyhere.  Distributed under the same GPL terms; see
+ * LICENSE-GPL-2.0.txt and the README's License section.  A program built with
+ * this file is a work based on it under the GPL.
+ */
 #ifndef _LCD_GSL3680_H
 #define _LCD_GSL3680_H
 
@@ -57,7 +68,28 @@ typedef struct _TPDSVR_SIG_T{
 	XY_DATA_T xy_position[3];
 }TPDSVR_SIG_T;
 
-esp_err_t gsl3680_touch_init_local(esp_lcd_panel_io_handle_t io, const esp_lcd_touch_config_t *config, esp_lcd_touch_handle_t *out_touch);
+/* The controller's I2C transport.  The GSL3680 shares its bus (GPIO7/8) with the
+ * ES8311 codec, the RX8025T RTC, the camera and the expansion headers, so this
+ * driver does not own an I2C peripheral: the caller supplies read/write hooks
+ * that go through the board's shared, mutex-protected bus.  `reg` is the
+ * 8-bit register index; a read is a register write followed by a
+ * repeated-start read of `len` bytes, a write is register + data in one
+ * transaction.  Return ESP_OK or an error. */
+typedef struct {
+    esp_err_t (*read)(void *ctx, uint8_t reg, uint8_t *data, uint8_t len);
+    esp_err_t (*write)(void *ctx, uint8_t reg, const uint8_t *data, uint8_t len);
+    void *ctx;
+} gsl3680_bus_t;
+
+esp_err_t gsl3680_touch_init_local(const gsl3680_bus_t *bus, const esp_lcd_touch_config_t *config, esp_lcd_touch_handle_t *out_touch);
+
+/* Bring the controller back after its reset line has been held low (chipguy):
+ * the same reset pulse + startup the vendor init runs after its firmware
+ * download, WITHOUT re-downloading, then (if `verify`) the firmware check word.
+ * Returns ESP_OK if the firmware survived (0xB0 reads 5A5A5A5A); ESP_FAIL means
+ * a full re-init is needed.  verify=false skips the check and its 30 ms wait —
+ * the firmware has been measured to survive a held reset (up to 2 min). */
+esp_err_t gsl3680_touch_restart_local(esp_lcd_touch_handle_t tp, bool verify);
 
 #define ESP_LCD_TOUCH_IO_I2C_GSL3680_ADDRESS          (0x40)
 

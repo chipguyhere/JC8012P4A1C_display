@@ -3,6 +3,8 @@
 /*
  * SPDX-FileCopyrightText: 2024 Espressif Systems (Shanghai) CO LTD
  *
+ * Modified by chipguyhere for the JC8012P4A1C libraries: Arduino build guard, this panel's settings.
+ *
  * SPDX-License-Identifier: Apache-2.0
  */
 
