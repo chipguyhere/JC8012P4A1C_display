@@ -35,7 +35,8 @@ Contents: [MIPI-DSI bring-up](#mipi-dsi-bring-up) · [Panel reset](#panel-reset-
   BOE; the glass supplier may vary.) The vendor table in `esp_lcd_jd9365.c` follows it.
 - **Timing:** DPI clock 60 MHz; H 800 + 20 sync + 20 back + 40 front = 880; V 1280 + 4 +
   8 + 20 = 1312 — the same porches as the vendor file. Refresh = 60 MHz / (880 × 1312) ≈
-  **52 Hz**.
+  **52 Hz**. `setPanelTiming()` changes it; see
+  [Refresh rate and video timing](#refresh-rate-and-video-timing).
 - **Lane rate:** the driver runs each lane at **1500 Mbps**. The vendor file's
   MediaTek-style `PLL_CLOCK=416` implies about 830 Mbps; the pixel stream needs
   60 MHz × 16 bit / 2 lanes = 480 Mbps plus protocol overhead. 1500 works on the board
@@ -46,6 +47,131 @@ Contents: [MIPI-DSI bring-up](#mipi-dsi-bring-up) · [Panel reset](#panel-reset-
   table in `esp_lcd_jd9365.c`, `esp_lcd_panel_init()` to start video mode, then Sleep Out
   (120 ms) and Display On. Both framebuffers are cleared and written back from cache
   before the backlight comes on.
+
+## Refresh rate and video timing
+
+`setPanelTiming(JC8012PanelTiming)`, called before `begin()`, sets the pixel clock and
+the six porches. The header has presets for the video rates (`JC8012_TIMING_47_952HZ`,
+`_48HZ`, `_50HZ`, `_59_94HZ`, `_60HZ`) and two slower ones that leave more render
+time (`_40HZ`, `_30HZ`). RasterBouncingBalls carries them as commented-out lines, plus
+an on-screen selector under its Advanced button (`RATE_CONTROLS`). Showing video one frame per refresh, or
+one per two refreshes for 23.976/24/25/29.97/30p, needs the panel rate to match the
+source. At the default 52.0 Hz, 24p judders and 30p cannot be paced evenly.
+
+**The pixel clock.** The DPI clock is a source divided by a whole number
+(`reg_mipi_dsi_dpiclk_div_num`). The sources are XTAL (40 MHz), PLL_F160M,
+PLL_F240M (the default) and the APLL. The driver takes the clock in whole MHz, so in
+practice it is 240/n or 160/n MHz: 120, 80, 60, 48, 40, … The rate is fine-tuned with
+the front porches instead. H_total and V_total each move in steps, but their product
+can land within a few ppm of almost any target:
+
+| Preset | Clock | H × V total (hfp, vfp) | Rate | Error | Row | Measured |
+|---|---|---|---|---|---|---|
+| `_30HZ` | 40 MHz | 1016 × 1312 (176, 20) | 30.008 | — | 25.4 µs | 30.008 Hz |
+| `_40HZ` | 48 MHz | 915 × 1312 (75, 20) | 39.985 | — | 19.1 µs | 39.984 Hz |
+| `_47_952HZ` | 60 MHz | 910 × 1375 (70, 83) | 48000/1001 | exact | 15.2 µs | 47.952 Hz |
+| `_48HZ` | 80 MHz | 1221 × 1365 (381, 73) | 48.000 | +1.0 ppm | 15.3 µs | 48.0 fps |
+| `_50HZ` | 60 MHz | 883 × 1359 (43, 67) | 50.000 | +2.5 ppm | 14.7 µs | 50.0 fps |
+| default | 60 MHz | 880 × 1312 (40, 20) | 51.97 | — | 14.7 µs | 51.970 Hz |
+| `_59_94HZ` | 80 MHz | 1002 × 1332 (162, 40) | 60000/1001 | +2.0 ppm | 12.5 µs | 59.941 Hz |
+| `_60HZ` | 80 MHz | 1001 × 1332 (161, 40) | 60.000 | +1.0 ppm | 12.5 µs | 60.0 fps |
+
+Sync and back porches stay at the vendor's 20/20 and 4/8 throughout. "Measured" is
+`framePeriodUs()` at boot (µs resolution, so ±0.003 Hz near 60) or the demo's
+once-a-second frame count. All were run on one unit on 2026-11-16 with
+RasterBouncingBalls at 100 balls: no underruns, no late chunks. The error column is
+small next to the 40 MHz crystal's own tolerance (tens of ppm). Every on-board clock
+(esp_timer, I²S, the PLLs) runs from that one crystal, so for A/V sync only the error
+against the crystal matters. At 2.5 ppm that is one 60 Hz frame of drift every ~2 hours,
+which a player's ordinary A/V resync absorbs.
+
+The panel ran from 40 to 80 MHz, at line rates from 39.4 kHz (30 Hz) to 79.9 kHz
+(60 Hz), and at 30–60 Hz. A fixed 80 MHz with the vendor's porches also ran
+(69.29 Hz). At 30 and 40 Hz there was **no visible flicker** (observed 2026-11-16).
+The image itself is not degraded; the only cost is the one any lower frame rate
+brings, less smooth motion. These rates suit sketches where render time
+decides whether the sketch works at all, especially mostly-static UIs. Fast
+animation, such as LVGL scrolling, shows the lower rate most.
+
+**Why the slow presets keep V_total at 1312.** A raster chunk has rows × H_total /
+pixel clock to be drawn. At a given rate, a short frame (small V_total) gives each row
+the most time. So the slow presets widen the line rather than adding blanking rows.
+Measured RasterBouncingBalls worst chunk at 200 see-through balls, against the time
+it has: 215 / 234 µs at 52 Hz, 206 / 305 µs at 40 Hz, 180 / 406 µs at 30 Hz. At
+59.94/60 Hz a chunk has 200 µs, and 100 balls drew in ~150.
+
+**The APLL does not work as the DPI clock.** The P4's audio PLL is fractional
+(`40 MHz × (4 + sdm2 + sdm1/256 + sdm0/65536) / (2 × (o_div + 2))`, ~1.5 ppm steps).
+It would have let the presets keep 880 × 1312 and move only the clock. Tried on
+2026-11-16: `periph_rtc_apll_acquire()` + `periph_rtc_apll_freq_set()` reported
+69,204,406 Hz, and `esp_clk_tree_src_get_freq_hz(APLL)` agreed. `dpiclk_src_sel` read
+3 (APLL), the divider 1 and the clock enabled. Yet the DPI produced **no frames at
+all**, at 69.2 MHz and also at 60 MHz, the clock that works from PLL_F240M. ESP-IDF's
+own DPI driver never sets up the APLL, so this path may simply be unsupported. The cause
+was not pursued, because the fixed PLLs reach every target within 2.5 ppm. The library
+therefore accepts only clocks that divide 240 or 160 MHz evenly. It logs an error and
+uses the default timing otherwise. A side benefit is that the panel never competes with
+I²S for the APLL.
+
+**Trimming the rate while the panel runs.** The bridge generates the frame timing.
+Writing `MIPI_DSI_BRIDGE.dpi_v_cfg0.vtotal` and then `dpi_config_update = 1` changes
+the frame length with no reinitialisation. The DSI host's `vid_vfp_lines` made no
+difference, so the host follows the bridge. Tried on 2026-11-16 at the 59.94 preset
+(V_total 1332), measuring 5 s per step at frame edges against `esp_timer`:
+
+| Change | Expected | Measured | Underruns |
+|---|---|---|---|
+| none | 59.94006 | 59.94020 | 0 |
+| +13 lines | 59.36083 | 59.36083 | 0 |
+| −13 lines | 60.53096 | 60.53096 | 0 |
+| +1 line every other frame | 59.91770 | 59.91770 | 0 |
+
+One line is 1/V_total of a frame (~750 ppm at 60 Hz). Dithering per frame (a
+sigma-delta on the fractional line count) gives any average rate in between, and
+the last row shows that per-frame writes land. The range is set by the front porch
+upward (`vtotal` is 12 bits) and by how far the porch can shrink downward.
+
+**`setRefreshHz(double hz)`** does this. The driver keeps V_total as 16.16 fixed point
+(`chipguy_lcd_dpi_panel_set_vtotal_q16()`). The frame-done interrupt adds the fraction
+to an accumulator and writes `(whole + carry)` to `vtotal` for the next frame. That is
+a first-order sigma-delta with 1/65536-line steps, ~0.01 ppm at 60 Hz. The pixel
+clock, the line and the active area never change; only the vertical front porch does.
+`setRefreshHz()` refuses a rate that would leave fewer than `JC8012_TRIM_MIN_VFP`
+(16) lines of front porch, or a `vtotal` above 4095. That allows speeding up by about
++1.8 % on the 59.94/60 Hz presets (vfp 40), +0.3 % on the default and the 30/40 Hz
+presets (vfp 20); slowing down has far more room. 16 is a margin, not a measured limit:
+27 lines is the shortest tried. `setRefreshHz(0)` puts back the configured V_total.
+
+Measured 2026-11-16 at the 59.94 preset, RasterBouncingBalls running, 10 s per step
+(`t` in that example):
+
+| Offset | Set | Measured | Difference | Underruns |
+|---|---|---|---|---|
+| 0 | 59.940180 | 59.940180 | 0.00 ppm | 0 |
+| +100 ppm | 59.946174 | 59.946180 | +0.10 ppm | 0 |
+| −100 ppm | 59.934186 | 59.934180 | −0.09 ppm | 0 |
+| +1000 ppm | 60.000120 | 60.000142 | +0.36 ppm | 0 |
+| −1000 ppm | 59.880240 | 59.880222 | −0.30 ppm | 0 |
+| +5000 ppm | 60.239880 | 60.239887 | +0.10 ppm | 0 |
+| −5000 ppm | 59.640479 | 59.640479 | 0.00 ppm | 0 |
+
+The differences are the measurement's own resolution (frame edges found by polling,
+over 10 s). Sub-ppm steps are set correctly but are below what this measurement can
+see. RasterBouncingBalls' **Advanced** view has the same controls on screen. It has a
+rate selector, which restarts at the chosen preset. It has a Trim slider in
+0.01 % steps, limited to the range `setRefreshHz()` allows. A Wobble checkbox swings
+the trim ±0.25 % over 20 s, the way a player following a stream's clock would. The
+readout shows the set rate to four decimals. Watched during trim and wobble: no
+wobble, flicker or other effect visible on the panel (observed 2026-11-16). The
+same code is in `_480display`; it compiles there but has not been run.
+
+**Costs.**
+- **Faster rows** at 59.94/60 Hz: 200 µs a 16-row chunk instead of 234. RasterBouncingBalls'
+  200 see-through balls (215 µs at 52 Hz) would run late there.
+- **PSRAM reads** for a framebuffer scale with the rate: 2 MB × 60 = 123 MB/s, against
+  107 at 52 Hz and 61 at 30 Hz.
+- **TODO (bench):** the LVGL framebuffer path (not just the raster band) at 60 Hz, and
+  light sleep / wake (`display.sleep()`) at a non-default timing.
 
 ## Panel reset and the retry budget
 

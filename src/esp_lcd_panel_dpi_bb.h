@@ -241,6 +241,18 @@ esp_err_t chipguy_lcd_dpi_panel_pause(esp_lcd_panel_handle_t panel, uint32_t tim
 esp_err_t chipguy_lcd_dpi_panel_resume(esp_lcd_panel_handle_t panel);
 
 /**
+ * @brief Trim the refresh rate while running: set the frame length.
+ *
+ * V_total (lines per frame, sync + porches + active) as 16.16 fixed point.
+ * Each frame's length is written to the bridge at the end of the frame
+ * before, rounded so the average over frames matches the fraction.  The
+ * caller checks the range (the bridge needs V_total > active + sync + back
+ * porch; the field is 12 bits).  0 restores the configured V_total.
+ */
+void chipguy_lcd_dpi_panel_set_vtotal_q16(uint32_t vtotal_q16);
+uint32_t chipguy_lcd_dpi_panel_get_vtotal_q16(void);   // the configured one if not trimming
+
+/**
  * @brief Get total frame count since initialization
  *
  * Useful for debugging and timing measurements.

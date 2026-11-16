@@ -70,6 +70,54 @@ static inline uint8_t jc8012_normalize_rotation(uint16_t rotation) {
     }
 }
 
+#ifndef JC8012_PANEL_TIMING_DEFINED   // shared with the sibling _display/_480display header
+#define JC8012_PANEL_TIMING_DEFINED
+// Panel video timing: pixel clock and porches.  The refresh rate is
+//   pixelClockHz / ((800 + hsync + hbp + hfp) * (1280 + vsync + vbp + vfp)).
+// The pixel clock is PLL_F240M or PLL_F160M divided by a whole number, so it
+// must be a whole number of MHz that divides 240 or 160 MHz evenly (60, 80,
+// 120, 40, ...).  begin() falls back to JC8012_TIMING_DEFAULT otherwise.
+// (The P4's fractional APLL is selectable as the DPI clock, but on this
+// board it gives no frames at all; see README-engineering.md.)
+struct JC8012PanelTiming {
+    uint32_t pixelClockHz;
+    uint16_t hsync, hbp, hfp;
+    uint16_t vsync, vbp, vfp;
+};
+
+// The default: 60 MHz with the panel vendor's porches, 880 x 1312 total
+// = 51.97 Hz.
+#define JC8012_TIMING_DEFAULT    JC8012PanelTiming{ 60000000, 20, 20, 40, 4, 8, 20 }
+
+// Video frame rates.  Sync and back porches stay the vendor's; the front
+// porches stretch the frame so the rate lands on the target, within a few
+// ppm -- inside the board crystal's own tolerance, which every on-board
+// clock (esp_timer, I2S audio) shares.
+//   47.952 Hz = 48000/1001  60 MHz,  910 x 1375  exact
+//   48.000 Hz               80 MHz, 1221 x 1365  +1.0 ppm
+//   50.000 Hz               60 MHz,  883 x 1359  +2.5 ppm
+//   59.940 Hz = 60000/1001  80 MHz, 1002 x 1332  +2.0 ppm
+//   60.000 Hz               80 MHz, 1001 x 1332  +1.0 ppm
+// See README-engineering.md, "Refresh rate and video timing".
+#define JC8012_TIMING_47_952HZ   JC8012PanelTiming{ 60000000, 20, 20,  70, 4, 8, 83 }
+#define JC8012_TIMING_48HZ       JC8012PanelTiming{ 80000000, 20, 20, 381, 4, 8, 73 }
+#define JC8012_TIMING_50HZ       JC8012PanelTiming{ 60000000, 20, 20,  43, 4, 8, 67 }
+#define JC8012_TIMING_59_94HZ    JC8012PanelTiming{ 80000000, 20, 20, 162, 4, 8, 40 }
+#define JC8012_TIMING_60HZ       JC8012PanelTiming{ 80000000, 20, 20, 161, 4, 8, 40 }
+
+// Not a video rate: ~40 Hz for more render time.  The vendor's 1312-row
+// frame at 48 MHz with a 915-pixel line = 39.985 Hz, so each row lasts
+// 19.06 us against the default's 14.67 (+30 % per raster chunk).
+#define JC8012_TIMING_40HZ       JC8012PanelTiming{ 48000000, 20, 20,  75, 4, 8, 20 }
+// ~30 Hz: 40 MHz with a 1016-pixel line = 30.008 Hz, 25.4 us a row.
+#define JC8012_TIMING_30HZ       JC8012PanelTiming{ 40000000, 20, 20, 176, 4, 8, 20 }
+#endif
+
+// setRefreshHz() keeps at least this many lines of vertical front porch.
+#ifndef JC8012_TRIM_MIN_VFP
+#define JC8012_TRIM_MIN_VFP 16
+#endif
+
 struct jc8012_rcopy;   // jc8012_raster_copy.h: the raster prefetch's GDMA copier
 
 class chipguy_JC8012P4A1C_display {
@@ -208,6 +256,31 @@ public:
     // the internal RAM the DMA lists take (setScanBlocks()), but LVGL and
     // the terminal need at least two.
     void setFramebufferCount(uint8_t n) { _num_fbs = n < 1 ? 1 : n > 3 ? 3 : n; }
+
+    // The panel's pixel clock and porches, and so its refresh rate.  Call
+    // BEFORE begin().  Use one of the JC8012_TIMING_* presets above, e.g.
+    // setPanelTiming(JC8012_TIMING_59_94HZ) to show 29.97/59.94 fps video
+    // one frame per refresh.  A faster clock shortens every row, so a raster
+    // band has less time per chunk (rasterChunkPeriodUs()).
+    void setPanelTiming(const JC8012PanelTiming &t) { _timing = t; }
+    const JC8012PanelTiming &panelTiming() const { return _timing; }
+    // The pixel clock actually running, in Hz (0 before begin()).
+    uint32_t pixelClockHz() const { return _pixel_clock_hz; }
+
+    // Fine-tune the refresh rate while the panel runs, without restarting
+    // it: e.g. a video player following a stream whose clock differs a
+    // little from the board's, by nudging the rate when its buffer drifts.
+    // The pixel clock and line stay as panelTiming() set them; the frame
+    // gets longer or shorter in its vertical front porch, by a fraction of a
+    // line averaged over frames (each frame is a whole number of lines,
+    // dithered: ~0.01 ppm resolution).  Slowing down has a wide range;
+    // speeding up stops when the front porch would fall below
+    // JC8012_TRIM_MIN_VFP lines (about +1.8 % on the 59.94/60 Hz presets,
+    // +0.3 % on the default timing).  Returns false, changing nothing, if
+    // hz is out of range or begin() hasn't run.  0 = back to the timing's
+    // own rate.  Takes effect at the next frame.
+    bool setRefreshHz(double hz);
+    double refreshHz() const;   // the rate now set (the timing's own if untrimmed)
 
     // --- Hardware scrolling (used by chipguy_JC8012P4A1C_terminal) -------------
     // Make each framebuffer `rows` rows tall instead of 1280, so a scrolling
@@ -359,6 +432,8 @@ private:
     uint16_t _fb_rows = 0;
     uint16_t _scan_blocks = 0;
     int      _irq_core = -1;
+    JC8012PanelTiming _timing = JC8012_TIMING_DEFAULT;
+    uint32_t _pixel_clock_hz = 0;
 
     // Raster band
     static bool _rasterDoneISR(uint32_t chunk, void *ctx);

@@ -7,7 +7,8 @@ is the framebuffer as usual, so LVGL can still own a strip of it.
 
 What you get for the work:
 
-- **Every panel refresh is a frame** (52 per second) without a framebuffer for the
+- **Every panel refresh is a frame** (52 per second by default; `setPanelTiming()` gives 30–60 Hz, see
+  [README-engineering.md](README-engineering.md#refresh-rate-and-video-timing)) without a framebuffer for the
   band, and without the PSRAM traffic of rendering into one.
 - **Nothing tears.** Each chunk is drawn shortly before it is scanned, so an animation
   that draws a whole frame from one snapshot of its state is never shown half old and

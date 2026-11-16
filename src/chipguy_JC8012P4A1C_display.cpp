@@ -226,13 +226,34 @@ bool chipguy_JC8012P4A1C_display::initHardware()
         return panelInitFailed("esp_lcd_new_panel_io_dbi", ret);
     }
 
+    // Pixel clock source: a fixed PLL divided by a whole number.  (The APLL
+    // is selectable too, but gives no frames on this board.)
+    if (_timing.pixelClockHz == 0 || _timing.pixelClockHz % 1000000 != 0 ||
+        (240000000 % _timing.pixelClockHz != 0 && 160000000 % _timing.pixelClockHz != 0)) {
+        ESP_LOGE(TAG, "Pixel clock %lu Hz does not divide 240 or 160 MHz; using the default timing",
+                 (unsigned long)_timing.pixelClockHz);
+        _timing = JC8012_TIMING_DEFAULT;
+    }
+    const JC8012PanelTiming &tm = _timing;
+    const uint32_t pclk_hz = tm.pixelClockHz;
+    const mipi_dsi_dpi_clock_source_t dpi_src = (240000000 % pclk_hz == 0)
+        ? MIPI_DSI_DPI_CLK_SRC_PLL_F240M : MIPI_DSI_DPI_CLK_SRC_PLL_F160M;
+    _pixel_clock_hz = pclk_hz;
+    const uint32_t h_total = PANEL_WIDTH + tm.hsync + tm.hbp + tm.hfp;
+    const uint32_t v_total = PANEL_HEIGHT + tm.vsync + tm.vbp + tm.vfp;
+    ESP_LOGI(TAG, "Pixel clock %lu Hz (%s), %lu x %lu total, %.3f Hz",
+             (unsigned long)pclk_hz,
+             dpi_src == MIPI_DSI_DPI_CLK_SRC_PLL_F160M ? "PLL_F160M" : "PLL_F240M",
+             (unsigned long)h_total, (unsigned long)v_total,
+             (double)pclk_hz / ((double)h_total * v_total));
+
     // Create DPI panel with double-buffering (native 800x1280)
     ESP_LOGI(TAG, "Creating panel %dx%d with %d framebuffers", PANEL_WIDTH, PANEL_HEIGHT, _num_fbs);
 
     chipguy_lcd_dpi_panel_config_t dpi_config = {
         .virtual_channel = 0,
-        .dpi_clk_src = MIPI_DSI_DPI_CLK_SRC_DEFAULT,
-        .dpi_clock_freq_mhz = 60,
+        .dpi_clk_src = dpi_src,
+        .dpi_clock_freq_mhz = pclk_hz / 1000000,   // divides the source evenly (checked above)
         .pixel_format = MIPI_DPI_PX_FORMAT,
         .in_color_format = (lcd_color_format_t)0,
         .out_color_format = (lcd_color_format_t)0,
@@ -240,12 +261,12 @@ bool chipguy_JC8012P4A1C_display::initHardware()
         .video_timing = {
             .h_size = PANEL_WIDTH,
             .v_size = PANEL_HEIGHT,
-            .hsync_pulse_width = 20,
-            .hsync_back_porch = 20,
-            .hsync_front_porch = 40,
-            .vsync_pulse_width = 4,
-            .vsync_back_porch = 8,
-            .vsync_front_porch = 20,
+            .hsync_pulse_width = tm.hsync,
+            .hsync_back_porch = tm.hbp,
+            .hsync_front_porch = tm.hfp,
+            .vsync_pulse_width = tm.vsync,
+            .vsync_back_porch = tm.vbp,
+            .vsync_front_porch = tm.vfp,
         },
         .virtual_v_pixels = _fb_rows,    // 0 = 1280; taller for the terminal's scroll ring
         .num_dma_blocks = _scan_blocks,  // 0 = 8
@@ -938,6 +959,30 @@ uint32_t chipguy_JC8012P4A1C_display::rasterCopyPausedUs() const { return _pfPau
 uint32_t chipguy_JC8012P4A1C_display::rasterChunkPeriodUs() const
 {
     return _rPeriodCycles / getCpuFrequencyMhz();
+}
+
+bool chipguy_JC8012P4A1C_display::setRefreshHz(double hz)
+{
+    if (!_panel_handle || !_pixel_clock_hz) return false;
+    if (hz == 0) {
+        chipguy_lcd_dpi_panel_set_vtotal_q16(0);
+        return true;
+    }
+    const JC8012PanelTiming &t = _timing;
+    const double h_total = PANEL_WIDTH + t.hsync + t.hbp + t.hfp;
+    const double lines = (double)_pixel_clock_hz / (h_total * hz);
+    const double min_lines = PANEL_HEIGHT + t.vsync + t.vbp + JC8012_TRIM_MIN_VFP;
+    if (!(lines >= min_lines && lines < 4095.0)) return false;   // vtotal is 12 bits
+    chipguy_lcd_dpi_panel_set_vtotal_q16((uint32_t)(lines * 65536.0 + 0.5));
+    return true;
+}
+
+double chipguy_JC8012P4A1C_display::refreshHz() const
+{
+    if (!_panel_handle || !_pixel_clock_hz) return 0;
+    const JC8012PanelTiming &t = _timing;
+    const double h_total = PANEL_WIDTH + t.hsync + t.hbp + t.hfp;
+    return (double)_pixel_clock_hz * 65536.0 / (h_total * chipguy_lcd_dpi_panel_get_vtotal_q16());
 }
 
 uint32_t chipguy_JC8012P4A1C_display::framePeriodUs() const

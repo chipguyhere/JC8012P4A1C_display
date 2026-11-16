@@ -103,6 +103,16 @@ static volatile uint32_t g_underrun_count = 0;
 static volatile int64_t g_frame_timestamp_even = 0;  // Timestamp when even frames end
 static volatile int64_t g_frame_timestamp_odd = 0;   // Timestamp when odd frames end
 
+// Fine refresh trim: the frame length (V_total, in lines) as 16.16 fixed
+// point, written to the bridge once per frame with the fraction carried
+// forward, so the average frame length can sit between two whole lines.
+// 0 = off (the configured V_total stands).  The bridge latches its DPI
+// timing on dpi_config_update; it does not need the panel restarted.
+static volatile uint32_t g_vtotal_q16 = 0;
+static uint32_t g_vtotal_acc = 0;          // fraction carried (ISR only)
+static uint32_t g_vtotal_base = 0;         // as configured
+static dsi_brg_dev_t *g_brg = NULL;
+
 #define DSI_MEM_ALLOC_CAPS (MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)
 
 typedef struct esp_lcd_dpi_panel_t esp_lcd_dpi_panel_t;
@@ -371,6 +381,15 @@ static bool dma_full_trans_done_cb(dw_gdma_channel_handle_t chan, const dw_gdma_
 
     g_frame_count++;
 
+    // Refresh trim: set the next frame's length, carrying the fraction.
+    const uint32_t vq = g_vtotal_q16;
+    if (vq && g_brg) {
+        const uint32_t acc = g_vtotal_acc + (vq & 0xFFFFu);
+        g_vtotal_acc = acc & 0xFFFFu;
+        g_brg->dpi_v_cfg0.vtotal = (vq >> 16) + (acc >> 16);
+        g_brg->dpi_config_update.dpi_config_update = 1;
+    }
+
     // The frame just read: if its raster band ends at the bottom, its last
     // chunk had no interrupt of its own (see configure_frame_llis).
     chipguy_lcd_dpi_raster_t done_raster = dpi_panel->raster;
@@ -627,6 +646,11 @@ esp_err_t chipguy_lcd_new_panel_dpi(esp_lcd_dsi_bus_handle_t bus, const chipguy_
 
     mipi_dsi_host_ll_dpi_enable_frame_ack(hal->host, true);
     mipi_dsi_host_ll_dpi_set_video_burst_type(hal->host, MIPI_DSI_LL_VIDEO_BURST_WITH_SYNC_PULSES);
+    g_brg = hal->bridge;
+    g_vtotal_q16 = 0;
+    g_vtotal_base = panel_config->video_timing.vsync_pulse_width + panel_config->video_timing.vsync_back_porch +
+                    panel_config->video_timing.v_size + panel_config->video_timing.vsync_front_porch;
+
     mipi_dsi_host_ll_dpi_set_video_packet_pixel_num(hal->host, panel_config->video_timing.h_size);
     mipi_dsi_host_ll_dpi_set_trunks_num(hal->host, 0);
     mipi_dsi_host_ll_dpi_set_null_packet_size(hal->host, 0);
@@ -993,6 +1017,23 @@ esp_err_t chipguy_lcd_dpi_panel_resume(esp_lcd_panel_handle_t panel)
     mipi_dsi_brg_ll_update_dpi_config(hal->bridge);
     mipi_dsi_brg_ll_enable_interrupt(hal->bridge, MIPI_DSI_BRG_LL_EVENT_UNDERRUN, true);
     return ESP_OK;
+}
+
+void chipguy_lcd_dpi_panel_set_vtotal_q16(uint32_t vtotal_q16)
+{
+    if (!g_brg) return;
+    if (vtotal_q16 == 0) {
+        g_vtotal_q16 = 0;   // stop trimming first, so the ISR can't overwrite this
+        g_brg->dpi_v_cfg0.vtotal = g_vtotal_base;
+        g_brg->dpi_config_update.dpi_config_update = 1;
+    } else {
+        g_vtotal_q16 = vtotal_q16;   // one 32-bit store: the ISR sees old or new
+    }
+}
+
+uint32_t chipguy_lcd_dpi_panel_get_vtotal_q16(void)
+{
+    return g_vtotal_q16 ? g_vtotal_q16 : g_vtotal_base << 16;
 }
 
 uint32_t chipguy_lcd_dpi_panel_get_frame_count(void)
